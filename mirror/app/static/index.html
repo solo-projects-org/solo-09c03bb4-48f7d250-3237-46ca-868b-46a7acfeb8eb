@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>震例目录逻辑复制镜像</title>
+<style>
+  :root { --bd:#d0d7de; --bg:#f6f8fa; --ok:#1a7f37; --warn:#9a6700; --err:#cf222e; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+         margin: 0; padding: 24px; color: #1f2328; background: var(--bg); }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  h2 { font-size: 15px; margin: 22px 0 8px; }
+  .card { background: #fff; border: 1px solid var(--bd); border-radius: 8px;
+          padding: 16px; margin-bottom: 16px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid var(--bd); padding: 6px 10px; text-align: left; }
+  th { background: var(--bg); font-weight: 600; }
+  .kv { display: grid; grid-template-columns: 200px 1fr; gap: 4px 12px; font-size: 13px; }
+  .kv b { color: #57606a; font-weight: 500; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px;
+           font-size: 12px; font-weight: 600; color: #fff; }
+  .STREAMING { background: var(--ok); }
+  .INITIALIZING { background: var(--warn); }
+  button { padding: 8px 16px; border: 1px solid var(--bd); border-radius: 6px;
+           background: #f6f8fa; cursor: pointer; font-size: 14px; }
+  button:hover { background: #eaeef2; }
+  button:disabled { opacity: .5; cursor: default; }
+  input, select { padding: 6px 8px; border: 1px solid var(--bd); border-radius: 6px; font-size: 13px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .err { color: var(--err); font-family: ui-monospace, monospace; font-size: 12px;
+         white-space: pre-wrap; word-break: break-all; }
+  .muted { color: #57606a; font-size: 12px; }
+  .pager button { padding: 3px 10px; }
+</style>
+</head>
+<body>
+<h1>地震台网 · 震例目录逻辑复制镜像</h1>
+
+<div class="card">
+  <div class="row">
+    <h2 style="margin:0">采集状态</h2>
+    <span id="state-badge" class="badge">--</span>
+    <span style="flex:1"></span>
+    <button id="btn-start">开始建立镜像</button>
+    <button id="btn-refresh">立即刷新</button>
+    <label class="muted"><input type="checkbox" id="auto" checked> 每 2 秒自动刷新</label>
+  </div>
+  <div class="kv" id="status"></div>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">震例查询（仅镜像完成后供数）</h2>
+  <div class="row">
+    <input id="keyword" placeholder="震例号关键字，如 CE2008" size="22">
+    <input id="min_mag" placeholder="最小震级" type="number" step="0.1" style="width:110px">
+    <button id="btn-query">查询</button>
+    <a href="/api/quakes.csv" target="_blank"><button type="button">下载当前目录 CSV</button></a>
+    <span id="serve-msg" class="err"></span>
+  </div>
+  <table>
+    <thead><tr>
+      <th>震例号</th><th>UTC 发震时刻</th><th>经度</th><th>纬度</th><th>震级</th>
+    </tr></thead>
+    <tbody id="quakes"></tbody>
+  </table>
+  <div class="row pager" style="margin-top:10px">
+    <button id="prev">上一页</button>
+    <span class="muted" id="page-info"></span>
+    <button id="next">下一页</button>
+    <span class="muted" id="total-info"></span>
+  </div>
+</div>
+
+<script>
+const LIMIT = 20;
+let offset = 0, total = 0;
+
+async function getJSON(url, opts) {
+  const r = await fetch(url, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(body.detail || r.statusText), {status: r.status});
+  return body;
+}
+
+function row(k, v) { return `<b>${k}</b><span>${v ?? '—'}</span>`; }
+
+async function refreshStatus() {
+  try {
+    const s = await getJSON('/api/status');
+    const badge = document.getElementById('state-badge');
+    badge.textContent = s.state;
+    badge.className = 'badge ' + s.state;
+    document.getElementById('status').innerHTML = [
+      row('复制槽', s.slot_name),
+      row('导出快照 ID', s.snapshot_id),
+      row('SQLite 已持久化水位线 (confirmed_lsn)',
+          `${s.confirmed_lsn_hex} (${s.confirmed_lsn})`),
+      row('PostgreSQL 槽确认位点',
+          s.slot_confirmed_lsn == null ? '槽不存在'
+            : `${s.slot_confirmed_lsn_hex} (${s.slot_confirmed_lsn})`),
+      row('水位线与槽位点差距',
+          s.slot_confirmed_lsn == null ? '—'
+            : (s.confirmed_lsn - s.slot_confirmed_lsn) + '（持久化后、确认前的未确认字节）'),
+      row('已应用行变更数', s.applied_count),
+      row('最近事务 xid', s.last_txid),
+      row('最近事务内容', s.last_change),
+      row('源库当前行数', s.source_rows),
+      row('工作线程', s.worker_running ? '运行中' : '空闲'),
+      row('ACK 演示延迟（秒）', s.ack_delay_seconds),
+      row('最近更新时间 UTC', s.updated_at),
+      s.last_error ? `<b>最近错误</b><span class="err">${s.last_error}</span>` : '',
+    ].join('');
+    document.getElementById('btn-start').disabled =
+        s.state === 'STREAMING' || s.worker_running || s.start_requested;
+    document.getElementById('serve-msg').textContent =
+        s.state === 'INITIALIZING' ? '初始镜像装载中，查询与 CSV 暂不可用（HTTP 503）' : '';
+  } catch (e) {
+    document.getElementById('status').innerHTML =
+        `<b>状态接口</b><span class="err">${e.message}</span>`;
+  }
+}
+
+async function query() {
+  const kw = document.getElementById('keyword').value.trim();
+  const mm = document.getElementById('min_mag').value;
+  const p = new URLSearchParams({limit: LIMIT, offset});
+  if (kw) p.set('keyword', kw);
+  if (mm) p.set('min_mag', mm);
+  try {
+    const d = await getJSON('/api/quakes?' + p.toString());
+    total = d.total;
+    document.getElementById('quakes').innerHTML = d.items.map(q =>
+      `<tr><td>${q.quake_no}</td><td>${q.origin_utc}</td>` +
+      `<td>${q.longitude}</td><td>${q.latitude}</td><td>${q.magnitude}</td></tr>`
+    ).join('') || '<tr><td colspan="5" class="muted">无匹配震例</td></tr>';
+    document.getElementById('total-info').textContent = `共 ${total} 条`;
+    const page = Math.floor(offset / LIMIT) + 1;
+    document.getElementById('page-info').textContent = `第 ${page} / ${Math.max(1, Math.ceil(total / LIMIT))} 页`;
+    document.getElementById('prev').disabled = offset === 0;
+    document.getElementById('next').disabled = offset + LIMIT >= total;
+  } catch (e) {
+    document.getElementById('quakes').innerHTML =
+      `<tr><td colspan="5" class="err">${e.status === 503 ? '503：初始镜像未完成，暂不供数' : e.message}</td></tr>`;
+  }
+}
+
+document.getElementById('btn-start').onclick = async () => {
+  await getJSON('/api/mirror/start', {method: 'POST'});
+  refreshStatus();
+};
+document.getElementById('btn-refresh').onclick = refreshStatus;
+document.getElementById('btn-query').onclick = () => { offset = 0; query(); };
+document.getElementById('prev').onclick = () => { offset = Math.max(0, offset - LIMIT); query(); };
+document.getElementById('next').onclick = () => { offset += LIMIT; query(); };
+
+refreshStatus(); query();
+setInterval(() => {
+  refreshStatus();
+  if (document.getElementById('auto').checked) query();
+}, 2000);
+</script>
+</body>
+</html>

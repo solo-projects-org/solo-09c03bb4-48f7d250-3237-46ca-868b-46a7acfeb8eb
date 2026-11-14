@@ -1,0 +1,55 @@
+services:
+  postgres:
+    build:
+      context: ./db
+    container_name: quake-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: seisnet
+      PGDATA: /var/lib/postgresql/data/pgdata
+    # 逻辑复制所需 WAL 配置；wal2json 在镜像内已安装
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_wal_senders=10"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_logical_replication_workers=4"
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d seisnet"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  mirror:
+    build:
+      context: ./mirror
+    container_name: quake-mirror
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PG_DSN: "host=postgres port=5432 dbname=seisnet user=replicator password=replicator"
+      SQLITE_PATH: "/data/mirror.db"
+      SLOT_NAME: "quake_mirror_slot"
+      SOURCE_TABLE: "public.quake"
+      POLL_INTERVAL: "0.5"
+      SNAPSHOT_BATCH: "500"
+      # 演示用：落盘后、确认复制槽前额外停留秒数（0=关闭）
+      ACK_DELAY: "${ACK_DELAY:-0}"
+    ports:
+      - "8000:8000"
+    volumes:
+      - mirror-data:/data
+
+volumes:
+  pgdata:
+  mirror-data:
